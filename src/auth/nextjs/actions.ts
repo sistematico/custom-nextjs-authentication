@@ -4,7 +4,7 @@ import { z } from "zod"
 import { redirect } from "next/navigation"
 import { signInSchema, signUpSchema } from "./schemas"
 import { db } from "@/drizzle/db"
-import { OAuthProvider, UserTable } from "@/drizzle/schema"
+import { UserTable } from "@/drizzle/schema"
 import { eq } from "drizzle-orm"
 import {
   comparePasswords,
@@ -13,7 +13,6 @@ import {
 } from "../core/passwordHasher"
 import { cookies } from "next/headers"
 import { createUserSession, removeUserFromSession } from "../core/session"
-import { getOAuthClient } from "../core/oauth/base"
 
 export async function signIn(unsafeData: z.infer<typeof signInSchema>) {
   const { success, data } = signInSchema.safeParse(unsafeData)
@@ -26,7 +25,7 @@ export async function signIn(unsafeData: z.infer<typeof signInSchema>) {
   })
 
   if (user == null || user.password == null || user.salt == null) {
-    return "Unable to log you in"
+    return "Invalid email or password"
   }
 
   const isCorrectPassword = await comparePasswords({
@@ -35,7 +34,7 @@ export async function signIn(unsafeData: z.infer<typeof signInSchema>) {
     salt: user.salt,
   })
 
-  if (!isCorrectPassword) return "Unable to log you in"
+  if (!isCorrectPassword) return "Invalid email or password"
 
   await createUserSession(user, await cookies())
 
@@ -69,7 +68,8 @@ export async function signUp(unsafeData: z.infer<typeof signUpSchema>) {
 
     if (user == null) return "Unable to create account"
     await createUserSession(user, await cookies())
-  } catch {
+  } catch (error) {
+    console.error("Error creating user:", error)
     return "Unable to create account"
   }
 
@@ -81,7 +81,4 @@ export async function logOut() {
   redirect("/")
 }
 
-export async function oAuthSignIn(provider: OAuthProvider) {
-  const oAuthClient = getOAuthClient(provider)
-  redirect(oAuthClient.createAuthUrl(await cookies()))
-}
+// A função oAuthSignIn foi removida

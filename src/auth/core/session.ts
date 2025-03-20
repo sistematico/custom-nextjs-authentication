@@ -1,11 +1,16 @@
 import { userRoles } from "@/drizzle/schema"
 import { z } from "zod"
-import crypto from "crypto"
-import { redisClient } from "@/redis/redis"
+import { SignJWT, jwtVerify } from "jose"
+// import { cookies } from "next/headers"
 
-// Seven days in seconds
+// Sete dias em segundos
 const SESSION_EXPIRATION_SECONDS = 60 * 60 * 24 * 7
-const COOKIE_SESSION_KEY = "session-id"
+const COOKIE_SESSION_KEY = "session-token"
+
+// Chave secreta para assinar o JWT (em produção, use uma variável de ambiente)
+const JWT_SECRET = new TextEncoder().encode(
+  process.env.JWT_SECRET || "default_secret_key_change_in_production"
+)
 
 const sessionSchema = z.object({
   id: z.string(),
@@ -28,75 +33,67 @@ export type Cookies = {
   delete: (key: string) => void
 }
 
-export function getUserFromSession(cookies: Pick<Cookies, "get">) {
-  const sessionId = cookies.get(COOKIE_SESSION_KEY)?.value
-  if (sessionId == null) return null
+export async function getUserFromSession(cookies: Pick<Cookies, "get">) {
+  const sessionToken = cookies.get(COOKIE_SESSION_KEY)?.value
+  if (!sessionToken) return null
 
-  return getUserSessionById(sessionId)
+  try {
+    const { payload } = await jwtVerify(sessionToken, JWT_SECRET, {
+      algorithms: ["HS256"],
+    })
+    
+    const { success, data } = sessionSchema.safeParse(payload)
+    return success ? data : null
+  } catch (error) {
+    console.error("Error verifying JWT:", error)
+    return null
+  }
 }
 
 export async function updateUserSessionData(
   user: UserSession,
-  cookies: Pick<Cookies, "get">
+  cookies: Pick<Cookies, "get" | "set">
 ) {
-  const sessionId = cookies.get(COOKIE_SESSION_KEY)?.value
-  if (sessionId == null) return null
-
-  await redisClient.set(`session:${sessionId}`, sessionSchema.parse(user), {
-    ex: SESSION_EXPIRATION_SECONDS,
-  })
+  // Substituir a sessão atual com uma nova contendo os dados atualizados
+  await createUserSession(user, cookies)
 }
 
 export async function createUserSession(
   user: UserSession,
   cookies: Pick<Cookies, "set">
 ) {
-  const sessionId = crypto.randomBytes(512).toString("hex").normalize()
-  await redisClient.set(`session:${sessionId}`, sessionSchema.parse(user), {
-    ex: SESSION_EXPIRATION_SECONDS,
-  })
+  const validatedUser = sessionSchema.parse(user)
+  
+  // Criar um JWT com os dados do usuário
+  const token = await new SignJWT(validatedUser)
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setExpirationTime(Math.floor(Date.now() / 1000) + SESSION_EXPIRATION_SECONDS)
+    .sign(JWT_SECRET)
 
-  setCookie(sessionId, cookies)
+  setCookie(token, cookies)
 }
 
 export async function updateUserSessionExpiration(
   cookies: Pick<Cookies, "get" | "set">
 ) {
-  const sessionId = cookies.get(COOKIE_SESSION_KEY)?.value
-  if (sessionId == null) return null
-
-  const user = await getUserSessionById(sessionId)
-  if (user == null) return
-
-  await redisClient.set(`session:${sessionId}`, user, {
-    ex: SESSION_EXPIRATION_SECONDS,
-  })
-  setCookie(sessionId, cookies)
+  const user = await getUserFromSession(cookies)
+  if (user) {
+    await createUserSession(user, cookies)
+  }
 }
 
 export async function removeUserFromSession(
-  cookies: Pick<Cookies, "get" | "delete">
+  cookies: Pick<Cookies, "delete">
 ) {
-  const sessionId = cookies.get(COOKIE_SESSION_KEY)?.value
-  if (sessionId == null) return null
-
-  await redisClient.del(`session:${sessionId}`)
   cookies.delete(COOKIE_SESSION_KEY)
 }
 
-function setCookie(sessionId: string, cookies: Pick<Cookies, "set">) {
-  cookies.set(COOKIE_SESSION_KEY, sessionId, {
+function setCookie(token: string, cookies: Pick<Cookies, "set">) {
+  cookies.set(COOKIE_SESSION_KEY, token, {
     secure: true,
     httpOnly: true,
     sameSite: "lax",
     expires: Date.now() + SESSION_EXPIRATION_SECONDS * 1000,
   })
-}
-
-async function getUserSessionById(sessionId: string) {
-  const rawUser = await redisClient.get(`session:${sessionId}`)
-
-  const { success, data: user } = sessionSchema.safeParse(rawUser)
-
-  return success ? user : null
 }
